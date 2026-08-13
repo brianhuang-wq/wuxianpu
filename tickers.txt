@@ -15,3 +15,4 @@
 ^TWII,台股加權指數
 ^GSPC,標普500
 QQQ,那斯達克100 ETF
+IVV,iShares 標普500 ETF
