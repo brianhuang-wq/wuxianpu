@@ -33,6 +33,17 @@
     border-radius:8px; padding:9px 11px; font-size:14px; font-family:inherit; }
   select { min-width:190px; font-weight:600; }
   #custom { width:180px; }
+  #code { width:150px; }
+  input[type=text] { background:var(--bg); border:1px solid var(--line); color:var(--fg);
+    border-radius:8px; padding:9px 11px; font-size:14px; font-family:inherit; }
+  .status { font-size:12.5px; margin-top:10px; padding:8px 12px; border-radius:8px; display:none; }
+  .status.on { display:block; }
+  .status.err { background:#fee2e2; color:#991b1b; }
+  .status.ok  { background:#e0f2fe; color:#075985; }
+  @media (prefers-color-scheme: dark) {
+    .status.err { background:#3b1616; color:#fca5a5; }
+    .status.ok  { background:#0c2b3d; color:#7dd3fc; }
+  }
   .chips { display:flex; gap:7px; flex-wrap:wrap; }
   .chip input { display:none; }
   .chip span { display:block; border:1px solid var(--line); background:var(--bg); border-radius:8px;
@@ -100,11 +111,21 @@
 <body>
 <div class="top"><div class="inner">
   <h1>樂活五線譜　股價位階分析</h1>
-  <div class="tagline">資料截至 2026/08/13（僅含已收盤價格）　·　免安裝，所有運算在本機瀏覽器完成</div>
+  <div class="tagline">內建資料截至 2026/08/13（僅含已收盤價格）　·　所有運算在本機瀏覽器完成　·　
+  自行輸入台股代碼可即時查詢</div>
   <div class="row">
     <div class="fld">
-      <label for="tk">股票</label>
-      <select id="tk" onchange="go()"></select>
+      <label for="tk">股票（內建清單）</label>
+      <select id="tk" onchange="pickPreset()"></select>
+    </div>
+    <div class="fld">
+      <label for="code">或自行輸入台股代碼</label>
+      <div style="display:flex;gap:7px">
+        <input type="text" id="code" placeholder="例：2412、00878"
+               autocomplete="off" inputmode="numeric"
+               onkeydown="if(event.key==='Enter')fetchCode()">
+        <button type="button" onclick="fetchCode()" style="padding:9px 16px">查詢</button>
+      </div>
     </div>
     <div class="fld">
       <label>回歸年限（可複選）</label>
@@ -117,10 +138,12 @@
     </div>
     <button onclick="go()">分析</button>
   </div>
+  <div class="status" id="msg"></div>
 </div></div>
 
 <div class="body">
   <div class="stats">
+    <div class="stat"><div class="k">標的</div><div class="v" id="name" style="font-size:17px;padding-top:4px"></div></div>
     <div class="stat"><div class="k">最新收盤</div><div class="v" id="px"></div></div>
     <div class="stat"><div class="k">市場情緒</div><div class="v" id="mood"></div></div>
     <div class="stat"><div class="k">標準差 σ</div><div class="v" id="sig"></div></div>
@@ -137,6 +160,8 @@
     <b>演算法</b>：取區間內日收盤價（未還原權息），以交易日序號為 x 跑最小平方線性迴歸得趨勢線，
     再以殘差標準差 σ 畫出 ±1σ、±2σ 共五條線。已對照 sentimentinsideout.com 驗證，誤差 &lt; 0.15。<br>
     <b>提醒</b>：新上市標的（如 009816）歷史不足時，長年限的五條線統計意義有限，畫面上會出現警告。<br>
+    <b>自行輸入代碼</b>：即時向 FinMind 查詢，僅支援台股（上市／上櫃）。
+    內建清單則為預先嵌入的資料，開啟即可用、不需連網。<br>
     本工具僅為技術面數值計算，<b>不構成投資建議</b>。
   </div>
 </div>
@@ -300,8 +325,65 @@ function pick(i) {
   render();
 }
 
+// ── 手動查詢台股：FinMind 開放 CORS，可直接由瀏覽器取得 ──
+let custom = null;          // 使用者查詢後暫存的標的
+const msg = document.getElementById('msg');
+
+function say(text, kind) {
+  msg.textContent = text;
+  msg.className = 'status on ' + (kind || 'ok');
+}
+function hide() { msg.className = 'status'; }
+
+function pickPreset() {
+  custom = null;
+  document.getElementById('code').value = '';
+  hide();
+  go();
+}
+
+async function fetchCode() {
+  const raw = document.getElementById('code').value.trim().toUpperCase();
+  if (!raw) { say('請先輸入股票代碼。', 'err'); return; }
+  if (!/^[0-9]{4,6}[A-Z]?$/.test(raw)) {
+    say('請輸入台股代碼（4~6 位數字，如 2412、00878）。此功能僅支援台股。', 'err');
+    return;
+  }
+
+  say('查詢 ' + raw + ' 中…');
+  // 抓 10.5 年，供十年線（2400 個交易日）計算
+  const from = new Date(Date.now() - 10.5 * 365.25 * 86400000)
+                 .toISOString().slice(0, 10);
+  const url = 'https://api.finmindtrade.com/api/v4/data'
+            + '?dataset=TaiwanStockPrice&data_id=' + encodeURIComponent(raw)
+            + '&start_date=' + from;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const json = await res.json();
+    const rows = (json.data || []).filter(r => r.close > 0);
+    if (!rows.length) {
+      say('查無 ' + raw + ' 的資料，請確認代碼是否正確。', 'err');
+      return;
+    }
+    rows.sort((a, b) => a.date < b.date ? -1 : 1);
+    custom = {
+      code: raw,
+      label: '自行查詢',
+      dates: rows.map(r => +r.date.replace(/-/g, '')),
+      closes: rows.map(r => +r.close),
+    };
+    say('已取得 ' + raw + '　' + rows.length + ' 筆（' + rows[0].date
+        + ' ~ ' + rows[rows.length - 1].date + '）', 'ok');
+    go();
+  } catch (err) {
+    say('查詢失敗：' + err.message
+        + '。可能是網路問題或 FinMind 服務暫時無法使用，請稍後再試。', 'err');
+  }
+}
+
 function go() {
-  const d = DATA[+document.getElementById('tk').value];
+  const d = custom || DATA[+document.getElementById('tk').value];
   let ys = [...document.querySelectorAll('#chips input:checked')].map(c => +c.value);
   const raw = document.getElementById('custom').value.trim();
   if (raw) raw.replace(/[,，]/g,' ').split(/\s+/).forEach(t => {
@@ -314,6 +396,8 @@ function go() {
   periods = ys.map(y => compute(d, y)).filter(Boolean);
   if (!periods.length) { alert('資料不足，無法分析'); return; }
 
+  document.getElementById('name').textContent =
+    custom ? (d.code + '　（即時查詢）') : (d.code + '　' + d.label);
   document.getElementById('px').textContent = '$' + periods[0].price.toLocaleString(
     undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
   document.getElementById('tabs').innerHTML =
