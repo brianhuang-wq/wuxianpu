@@ -12,8 +12,8 @@ import os
 import wuxianpu as core
 
 TICKERS = [("0050", "元大台灣50"), ("0056", "元大高股息"), ("006208", "富邦台50"),
-           ("2330", "台積電"), ("2454", "聯發科"), ("009816", "凱基台灣50"),
-           ("^TWII", "台股加權指數")]
+           ("2330", "台積電"), ("2454", "聯發科"), ("009816", "凱基台灣50", "0050"),
+           ("^TWII", "台股加權指數"), ("^SOX", "費城半導體指數")]
 
 TEMPLATE = r"""<!DOCTYPE html>
 <html lang="zh-TW">
@@ -81,6 +81,12 @@ TEMPLATE = r"""<!DOCTYPE html>
   .warn { background:#fef3c7; color:#92400e; border-radius:8px; padding:10px 14px;
           font-size:13px; margin-bottom:14px; }
   @media (prefers-color-scheme: dark) { .warn { background:#3a2f12; color:#fcd34d; } }
+  .info { background:#ede9fe; color:#4c1d95; border-radius:8px; padding:10px 14px;
+          font-size:13px; margin-bottom:14px; line-height:1.7; }
+  @media (prefers-color-scheme: dark) { .info { background:#2a2140; color:#c4b5fd; } }
+  .px { display:inline-block; font-size:11px; font-weight:600; color:#6d28d9; background:#ede9fe;
+        border-radius:4px; padding:1px 6px; margin-left:6px; vertical-align:1px; white-space:nowrap; }
+  @media (prefers-color-scheme: dark) { .px { color:#c4b5fd; background:#2a2140; } }
   #chart { position:relative; width:100%; background:var(--panel); border:1px solid var(--line);
            border-radius:12px; padding:12px 10px 6px; }
   svg { display:block; width:100%; overflow:visible; }
@@ -176,7 +182,10 @@ TEMPLATE = r"""<!DOCTYPE html>
   <div class="note">
     <b>演算法</b>：取區間內日收盤價（未還原權息），以交易日序號為 x 跑最小平方線性迴歸得趨勢線，
     再以殘差標準差 σ 畫出 ±1σ、±2σ 共五條線。已對照 sentimentinsideout.com 驗證，誤差 &lt; 0.15。<br>
-    <b>提醒</b>：新上市標的（如 009816）歷史不足時，長年限的五條線統計意義有限，畫面上會出現警告。<br>
+    <b>提醒</b>：新上市標的歷史不足時，長年限的五條線統計意義有限，畫面上會出現警告。<br>
+    <b>0050回推</b>：009816 上市未滿長年限，不足的年限與均線改用 0050 的價格乘以比例 k
+    （k = 009816 最新收盤 ÷ 同日 0050 收盤）類推，並標示「0050回推」。因兩者配息方式不同、
+    比例會隨時間漂移，回推值為類推價格，僅供參考。<br>
     <b>自行輸入代碼</b>：即時向 FinMind 查詢，僅支援台股（上市／上櫃）。
     內建清單則為預先嵌入的資料，開啟即可用、不需連網。<br>
     本工具僅為技術面數值計算，<b>不構成投資建議</b>。
@@ -203,8 +212,29 @@ tunePad();
 let periods = [], cur = null, geom = null;
 const chart = document.getElementById('chart'), tip = document.getElementById('tip');
 
+// 回推：以來源標的價格 × k 建立類推序列（k 取兩者最後共同交易日的收盤比）
+DATA.forEach(d => {
+  if (!d.proxy) return;
+  const src = DATA.find(x => x.code === d.proxy);
+  if (!src) return;
+  const last = d.dates[d.dates.length-1];
+  let j = src.dates.length - 1;
+  while (j >= 0 && src.dates[j] > last) j--;
+  if (j < 0) return;
+  const srcIdx = new Map(src.dates.map((v,i) => [v,i]));
+  // 盡量找同一天；找不到就用 last 之前最近的一天
+  let me = d.closes.length - 1;
+  while (me >= 0 && !srcIdx.has(d.dates[me])) me--;
+  const ref = me >= 0 ? { a:d.closes[me], b:src.closes[srcIdx.get(d.dates[me])], dt:d.dates[me] }
+                      : { a:d.closes[d.closes.length-1], b:src.closes[j], dt:src.dates[j] };
+  const k = ref.a / ref.b;
+  d.px = { code:d.code, src:src.code, k, refDate:ref.dt, refA:ref.a, refB:ref.b,
+           dates:src.dates.slice(0, j+1), closes:src.closes.slice(0, j+1).map(v => v*k),
+           real:new Map(d.dates.map((v,i) => [v, d.closes[i]])) };
+});
+
 document.getElementById('tk').innerHTML =
-  DATA.map((d,i) => `<option value="${i}">${d.code}　${d.label}</option>`).join('');
+  DATA.map((d,i) => d.hidden ? '' : `<option value="${i}">${d.code}　${d.label}</option>`).join('');
 document.getElementById('chips').innerHTML =
   PRESET.map(y => `<label class="chip"><input type="checkbox" value="${y}"
     ${[1,3.5,5,10].includes(y)?'checked':''}><span>${y} 年</span></label>`).join('');
@@ -239,14 +269,32 @@ function compute(d, years) {
 
   const actual = (num2date(dates[m-1]) - num2date(dates[0])) / (365.25*86400000);
   let warn = "";
-  if (actual < years*0.9)
+  const short = actual < years*0.9;
+  if (short)
     warn = `要求 ${years} 年，實際僅取得 ${actual.toFixed(2)} 年（${m} 個交易日）。`
          + `多為新上市標的所致，五條線僅供參考，統計意義有限。`;
   else if (m < 60) warn = `樣本僅 ${m} 個交易日，迴歸結果不穩定。`;
 
   const pos = (price - levels["極度恐懼"]) / (levels["極度貪婪"] - levels["極度恐懼"]) * 100;
-  return { years, dates, prices:y, n:m, t0, tN, sigma, levels, mood, price, warn, pos,
+  return { years, dates, prices:y, n:m, t0, tN, sigma, levels, mood, price, warn, pos, short, actual,
            range: `${fmtDate(dates[0])} ~ ${fmtDate(dates[m-1])}` };
+}
+
+const PXTAG = p => p && p.proxy ? `<span class="px">${p.src}回推</span>` : '';
+
+function computeWithProxy(d, years) {
+  const p = compute(d, years);
+  if (!d.px || (p && !p.short)) return p;
+  const q = compute(d.px, years);
+  if (!q) return p;
+  q.proxy = true; q.src = d.px.src;
+  q.real = q.dates.map(v => d.px.real.has(v) ? d.px.real.get(v) : null);
+  const have = p ? p.actual : 0;
+  q.warn = '';
+  q.info = `${d.code} 上市僅 ${have.toFixed(2)} 年，${years} 年回歸改用 ${q.src} 回推：`
+    + `類推價 = ${q.src} 收盤 × k，k = ${d.px.refA} ÷ ${d.px.refB} = ${d.px.k.toFixed(4)}`
+    + `（${fmtDate(d.px.refDate)} 收盤比）。五條線為類推價格；灰線為回推價、黑線為 ${d.code} 實際價。`;
+  return q;
 }
 
 function movingAverages(closes) {
@@ -290,15 +338,22 @@ function render() {
     s += `<rect x="${W-PAD.r+3}" y="${yv-8}" width="${bw}" height="16" rx="4" fill="${b[2]}"/>`;
     s += `<text x="${W-PAD.r+3+bw/2}" y="${yv+4}" text-anchor="middle" font-size="${narrow?9.5:10.5}" fill="#fff" font-weight="600">${p.levels[b[0]].toFixed(1)}</text>`;
   });
-  s += `<polyline fill="none" stroke="var(--fg)" stroke-width="1.25" stroke-linejoin="round" points="${
+  s += `<polyline fill="none" stroke="${p.proxy?'var(--muted)':'var(--fg)'}" stroke-width="1.25" stroke-linejoin="round"${p.proxy?' opacity=".75"':''} points="${
     p.prices.map((v,i)=>`${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ')}"/>`;
+  if (p.proxy) {
+    const pts = p.real.map((v,i) => v==null ? null : `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).filter(Boolean);
+    if (pts.length > 1)
+      s += `<polyline fill="none" stroke="var(--fg)" stroke-width="1.4" stroke-linejoin="round" points="${pts.join(' ')}"/>`;
+  }
   s += `<line id="cross" x1="0" y1="${PAD.t}" x2="0" y2="${H-PAD.b}" stroke="var(--muted)" stroke-dasharray="3 3" opacity="0"/>`;
   s += `<g id="dots"></g><rect x="${PAD.l}" y="${PAD.t}" width="${iw}" height="${ih}" fill="transparent" id="hit"/></svg>`;
   chart.innerHTML = s; chart.appendChild(tip); bind();
 
   document.getElementById('legend').innerHTML =
     BANDS.map(b => `<span><i style="background:${b[2]}"></i>${b[0]} ${p.levels[b[0]].toFixed(2)}</span>`).join('')
-    + `<span><i style="background:var(--fg)"></i>股價 ${p.price.toFixed(2)}</span>`;
+    + (p.proxy ? `<span><i style="background:var(--muted)"></i>${p.src}回推價</span>` : '')
+    + `<span><i style="background:var(--fg)"></i>股價 ${p.price.toFixed(2)}</span>`
+    + PXTAG(p);
 }
 
 function bind() {
@@ -312,10 +367,13 @@ function bind() {
     const x = geom.X(i);
     cross.setAttribute('x1',x); cross.setAttribute('x2',x); cross.setAttribute('opacity','1');
     const items = BANDS.map(b => ({nm:b[0], v:lineVal(cur,b[1],i), c:b[2]}));
-    items.push({nm:'價格', v:cur.prices[i], c:'var(--fg)'});
+    if (cur.proxy) {
+      items.push({nm:cur.src+'回推價', v:cur.prices[i], c:'var(--muted)'});
+      if (cur.real[i] != null) items.push({nm:'實際價格', v:cur.real[i], c:'var(--fg)'});
+    } else items.push({nm:'價格', v:cur.prices[i], c:'var(--fg)'});
     items.sort((a,b) => b.v-a.v);
     dots.innerHTML = items.map(it =>
-      `<circle cx="${x}" cy="${geom.Y(it.v)}" r="3.6" fill="${it.c==='var(--fg)'?'#111':it.c}" stroke="#fff" stroke-width="1.3"/>`).join('');
+      `<circle cx="${x}" cy="${geom.Y(it.v)}" r="3.6" fill="${it.c==='var(--fg)'?'#111':it.c==='var(--muted)'?'#9aa0ac':it.c}" stroke="#fff" stroke-width="1.3"/>`).join('');
     tip.innerHTML = `<div class="d">${fmtDate(cur.dates[i])}</div>` + items.map(it =>
       `<div class="r"><span class="dot" style="background:${it.c}"></span><span class="nm">${it.nm}</span><span class="vl">${it.v.toFixed(2)}</span></div>`).join('');
     tip.style.opacity = '1';
@@ -323,6 +381,8 @@ function bind() {
     let lx = x+16; if (lx+tw > geom.W) lx = x-tw-16;
     tip.style.left = lx+'px';
     tip.style.top = Math.min(Math.max(geom.Y(cur.prices[i])-th/2, 4), geom.H-th-4)+'px';
+    if (cur.proxy && cur.real[i] == null)
+      tip.querySelector('.d').innerHTML += ` <span class="px">${cur.src}回推</span>`;
   }
   function leave(){ tip.style.opacity='0'; cross.setAttribute('opacity','0'); dots.innerHTML=''; }
   hit.addEventListener('mousemove', move);
@@ -337,8 +397,10 @@ function pick(i) {
   document.getElementById('mood').textContent = cur.mood;
   document.getElementById('mood').style.color = MOODC[cur.mood];
   document.getElementById('sig').textContent = cur.sigma.toFixed(2);
-  document.getElementById('rng').textContent = cur.range;
-  document.getElementById('warnbox').innerHTML = cur.warn ? `<div class="warn">⚠ ${cur.warn}</div>` : '';
+  document.getElementById('rng').innerHTML = cur.range + PXTAG(cur);
+  document.getElementById('warnbox').innerHTML =
+    (cur.info ? `<div class="info">ⓘ ${cur.info}</div>` : '') +
+    (cur.warn ? `<div class="warn">⚠ ${cur.warn}</div>` : '');
   render();
 }
 
@@ -410,7 +472,7 @@ function go() {
   ys = [...new Set(ys)].sort((a,b) => a-b);
   if (!ys.length) ys = [3.5];
 
-  periods = ys.map(y => compute(d, y)).filter(Boolean);
+  periods = ys.map(y => computeWithProxy(d, y)).filter(Boolean);
   if (!periods.length) { alert('資料不足，無法分析'); return; }
 
   document.getElementById('name').textContent =
@@ -418,11 +480,11 @@ function go() {
   document.getElementById('px').textContent = '$' + periods[0].price.toLocaleString(
     undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
   document.getElementById('tabs').innerHTML =
-    periods.map((p,i) => `<button onclick="pick(${i})">${p.years} 年回歸</button>`).join('');
+    periods.map((p,i) => `<button onclick="pick(${i})">${p.years} 年回歸${p.proxy?'（'+p.src+'回推）':''}</button>`).join('');
 
   document.getElementById('tbl').innerHTML = periods.length < 2 ? '' :
     `<div class="cap">期間比較</div><table><thead><tr><th>線別</th>` +
-    periods.map(p => `<th>${p.years} 年</th>`).join('') + `</tr></thead><tbody>` +
+    periods.map(p => `<th>${p.years} 年${p.proxy?'<br><span class="px" style="margin:0">'+p.src+'回推</span>':''}</th>`).join('') + `</tr></thead><tbody>` +
     BANDS.map(b => `<tr><td><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${b[2]};margin-right:7px"></span>${b[0]}</td>` +
       periods.map(p => `<td>${p.levels[b[0]].toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</td>`).join('') + `</tr>`).join('') +
     `<tr><td>市場情緒</td>` + periods.map(p => `<td style="color:${MOODC[p.mood]};font-weight:600">${p.mood}</td>`).join('') + `</tr>` +
@@ -430,13 +492,17 @@ function go() {
     `</tbody></table>`;
 
   // 價位總覽：五線譜各期間 + 各條均線 + 現價，合併後由高到低排序
-  const price = periods[0].price;
+  const price = d.closes[d.closes.length-1];
   const mas = movingAverages(d.closes);
+  if (d.px && !custom) {
+    const pm = movingAverages(d.px.closes);
+    mas.forEach((m,i) => { if (!m.ok && pm[i].ok) Object.assign(m, { ok:true, v:pm[i].v, proxy:true, src:d.px.src }); });
+  }
   let items = [];
   periods.forEach(p => BANDS.forEach(b =>
-    items.push({ v:p.levels[b[0]], c:b[2], cat:`五線譜 ${p.years} 年`, nm:b[0] })));
+    items.push({ v:p.levels[b[0]], c:b[2], cat:`五線譜 ${p.years} 年`, nm:b[0] + PXTAG(p) })));
   mas.filter(m => m.ok).forEach(m =>
-    items.push({ v:m.v, c:MACOLOR, cat:"移動平均", nm:`${m.nm}（${m.n}MA）` }));
+    items.push({ v:m.v, c:MACOLOR, cat:"移動平均", nm:`${m.nm}（${m.n}MA）` + PXTAG(m) }));
   items.push({ v:price, c:"#111", cat:"現價", nm:"最新收盤", now:true });
   items.sort((a,b) => b.v - a.v);
 
@@ -477,7 +543,9 @@ def load_tickers(path):
                 continue
             parts = [p.strip() for p in line.replace("\t", ",").split(",")]
             if parts[0]:
-                items.append((parts[0], parts[1] if len(parts) > 1 else parts[0]))
+                label = parts[1] if len(parts) > 1 and parts[1] else parts[0]
+                proxy = parts[2] if len(parts) > 2 and parts[2] else ""
+                items.append((parts[0], label, proxy) if proxy else (parts[0], label))
     return items or TICKERS
 
 
@@ -494,23 +562,41 @@ def main():
     end = dt.date.today()
     start = end - dt.timedelta(days=round(365.25 * args.years))
 
+    def fetch(code, label):
+        _sym, _name, rows, intraday = core.resolve(code, start, end)
+        if intraday:                           # 排除未收盤的盤中價
+            rows = [r for r in rows if r[0] != intraday["date"]]
+        if not rows:
+            raise ValueError("無可用資料")
+        print(f"  {code:8} {label:12} {len(rows):5} 筆　最新 {rows[-1][1]:,.2f}")
+        return {
+            "code": code, "label": label,
+            "dates": [int(r[0].strftime("%Y%m%d")) for r in rows],
+            "closes": [round(r[1], 2) for r in rows],
+        }
+
     payload, failed = [], []
-    for code, label in tickers:
+    for item in tickers:
+        code, label = item[0], item[1]
+        proxy = item[2] if len(item) > 2 else ""
         try:
-            _sym, _name, rows, intraday = core.resolve(code, start, end)
-            if intraday:                       # 排除未收盤的盤中價
-                rows = [r for r in rows if r[0] != intraday["date"]]
-            if not rows:
-                raise ValueError("無可用資料")
-            payload.append({
-                "code": code, "label": label,
-                "dates": [int(r[0].strftime("%Y%m%d")) for r in rows],
-                "closes": [round(r[1], 2) for r in rows],
-            })
-            print(f"  {code:8} {label:12} {len(rows):5} 筆　最新 {rows[-1][1]:,.2f}")
+            entry = fetch(code, label)
+            if proxy:
+                entry["proxy"] = proxy
+            payload.append(entry)
         except Exception as exc:               # noqa: BLE001
             failed.append(code)
             print(f"  {code:8} 略過（{exc}）")
+
+    # 回推來源若不在清單內，額外抓取並以隱藏項目嵌入（不出現在下拉選單）
+    have = {p["code"] for p in payload}
+    for need in sorted({p["proxy"] for p in payload if p.get("proxy")} - have):
+        try:
+            extra = fetch(need, need)
+            extra["hidden"] = True
+            payload.append(extra)
+        except Exception as exc:               # noqa: BLE001
+            print(f"  {need:8} 回推來源抓取失敗（{exc}），相關標的將不做回推")
 
     if not payload:
         raise SystemExit("所有標的都抓取失敗，未產生檔案。")
