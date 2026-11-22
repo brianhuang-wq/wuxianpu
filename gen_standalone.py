@@ -290,13 +290,13 @@ function computeWithProxy(d, years) {
   if (!d.px || (p && full)) return p;
   const q = compute(d.px, years);
   if (!q) return p;
-  q.proxy = true; q.src = d.px.src;
+  q.proxy = true; q.src = d.px.src; q.code = d.code;
   q.real = q.dates.map(v => d.px.real.has(v) ? d.px.real.get(v) : null);
   const have = p ? p.actual : 0;
   q.warn = '';
   q.info = `${d.code} 上市僅 ${have.toFixed(2)} 年，${years} 年回歸改用 ${q.src} 回推：`
     + `類推價 = ${q.src} 收盤 × k，k = ${d.px.refA} ÷ ${d.px.refB} = ${d.px.k.toFixed(4)}`
-    + `（${fmtDate(d.px.refDate)} 收盤比）。五條線為類推價格；灰線為回推價、黑線為 ${d.code} 實際價。`;
+    + `（${fmtDate(d.px.refDate)} 收盤比）。五條線為類推價格；圖中黑線為 ${d.code} 實際價格（${fmtDate(d.dates[0])} 上市起）。`;
   return q;
 }
 
@@ -317,8 +317,9 @@ function render() {
   const p = cur, W = chart.clientWidth - (narrow ? 8 : 20);
   const H = narrow ? Math.max(300, W * 0.95) : Math.max(360, Math.min(540, W * 0.5));
   const iw = W-PAD.l-PAD.r, ih = H-PAD.t-PAD.b;
-  let lo = Math.min(...p.prices, lineVal(p,-2,0), lineVal(p,-2,p.n-1));
-  let hi = Math.max(...p.prices, lineVal(p,2,0), lineVal(p,2,p.n-1));
+  const shown = p.proxy ? p.real.filter(v => v != null) : p.prices;   // 回推時只畫實際價格
+  let lo = Math.min(...shown, lineVal(p,-2,0), lineVal(p,-2,p.n-1));
+  let hi = Math.max(...shown, lineVal(p,2,0), lineVal(p,2,p.n-1));
   const q = (hi-lo)*0.06; lo -= q; hi += q;
   const X = i => PAD.l + (p.n>1 ? i/(p.n-1) : .5)*iw, Y = v => PAD.t + (1-(v-lo)/(hi-lo))*ih;
   geom = { X, Y, W, H, iw };
@@ -341,9 +342,9 @@ function render() {
     s += `<rect x="${W-PAD.r+3}" y="${yv-8}" width="${bw}" height="16" rx="4" fill="${b[2]}"/>`;
     s += `<text x="${W-PAD.r+3+bw/2}" y="${yv+4}" text-anchor="middle" font-size="${narrow?9.5:10.5}" fill="#fff" font-weight="600">${p.levels[b[0]].toFixed(1)}</text>`;
   });
-  s += `<polyline fill="none" stroke="${p.proxy?'var(--muted)':'var(--fg)'}" stroke-width="1.25" stroke-linejoin="round"${p.proxy?' opacity=".75"':''} points="${
+  if (!p.proxy) s += `<polyline fill="none" stroke="var(--fg)" stroke-width="1.25" stroke-linejoin="round" points="${
     p.prices.map((v,i)=>`${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ')}"/>`;
-  if (p.proxy) {
+  else {
     const pts = p.real.map((v,i) => v==null ? null : `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).filter(Boolean);
     if (pts.length > 1)
       s += `<polyline fill="none" stroke="var(--fg)" stroke-width="1.4" stroke-linejoin="round" points="${pts.join(' ')}"/>`;
@@ -354,7 +355,6 @@ function render() {
 
   document.getElementById('legend').innerHTML =
     BANDS.map(b => `<span><i style="background:${b[2]}"></i>${b[0]} ${p.levels[b[0]].toFixed(2)}</span>`).join('')
-    + (p.proxy ? `<span><i style="background:var(--muted)"></i>${p.src}回推價</span>` : '')
     + `<span><i style="background:var(--fg)"></i>股價 ${p.price.toFixed(2)}</span>`
     + PXTAG(p);
 }
@@ -370,22 +370,20 @@ function bind() {
     const x = geom.X(i);
     cross.setAttribute('x1',x); cross.setAttribute('x2',x); cross.setAttribute('opacity','1');
     const items = BANDS.map(b => ({nm:b[0], v:lineVal(cur,b[1],i), c:b[2]}));
-    if (cur.proxy) {
-      items.push({nm:cur.src+'回推價', v:cur.prices[i], c:'var(--muted)'});
-      if (cur.real[i] != null) items.push({nm:'實際價格', v:cur.real[i], c:'var(--fg)'});
-    } else items.push({nm:'價格', v:cur.prices[i], c:'var(--fg)'});
+    const pv = cur.proxy ? cur.real[i] : cur.prices[i];
+    if (pv != null) items.push({nm:'價格', v:pv, c:'var(--fg)'});
     items.sort((a,b) => b.v-a.v);
     dots.innerHTML = items.map(it =>
-      `<circle cx="${x}" cy="${geom.Y(it.v)}" r="3.6" fill="${it.c==='var(--fg)'?'#111':it.c==='var(--muted)'?'#9aa0ac':it.c}" stroke="#fff" stroke-width="1.3"/>`).join('');
+      `<circle cx="${x}" cy="${geom.Y(it.v)}" r="3.6" fill="${it.c==='var(--fg)'?'#111':it.c}" stroke="#fff" stroke-width="1.3"/>`).join('');
     tip.innerHTML = `<div class="d">${fmtDate(cur.dates[i])}</div>` + items.map(it =>
       `<div class="r"><span class="dot" style="background:${it.c}"></span><span class="nm">${it.nm}</span><span class="vl">${it.v.toFixed(2)}</span></div>`).join('');
     tip.style.opacity = '1';
     const tw = tip.offsetWidth, th = tip.offsetHeight;
     let lx = x+16; if (lx+tw > geom.W) lx = x-tw-16;
     tip.style.left = lx+'px';
-    tip.style.top = Math.min(Math.max(geom.Y(cur.prices[i])-th/2, 4), geom.H-th-4)+'px';
-    if (cur.proxy && cur.real[i] == null)
-      tip.querySelector('.d').innerHTML += ` <span class="px">${cur.src}回推</span>`;
+    tip.style.top = Math.min(Math.max(geom.Y(pv != null ? pv : lineVal(cur,0,i))-th/2, 4), geom.H-th-4)+'px';
+    if (cur.proxy && pv == null)
+      tip.querySelector('.d').innerHTML += ` <span class="px">${d0()}尚未上市</span>`;
   }
   function leave(){ tip.style.opacity='0'; cross.setAttribute('opacity','0'); dots.innerHTML=''; }
   hit.addEventListener('mousemove', move);
@@ -393,6 +391,8 @@ function bind() {
   hit.addEventListener('touchmove', e => { move(e); e.preventDefault(); }, {passive:false});
   hit.addEventListener('touchend', leave);
 }
+
+function d0() { return cur && cur.code ? cur.code : ''; }
 
 function pick(i) {
   cur = periods[i];
