@@ -284,7 +284,10 @@ const PXTAG = p => p && p.proxy ? `<span class="px">${p.src}回推</span>` : '';
 
 function computeWithProxy(d, years) {
   const p = compute(d, years);
-  if (!d.px || (p && !p.short)) return p;
+  // 自身資料已涵蓋完整回歸區間（容許 7 天假期誤差）就用自己的價格，不再回推
+  const startMs = num2date(d.dates[d.dates.length-1]).getTime() - years*365.25*86400000;
+  const full = num2date(d.dates[0]).getTime() <= startMs + 7*86400000;
+  if (!d.px || (p && full)) return p;
   const q = compute(d.px, years);
   if (!q) return p;
   q.proxy = true; q.src = d.px.src;
