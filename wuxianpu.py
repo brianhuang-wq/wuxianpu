@@ -92,7 +92,12 @@ def fetch_prices(ticker: str, start: dt.date, end: dt.date):
     intraday = None
     period = (meta.get("currentTradingPeriod") or {}).get("regular") or {}
     quote_time = meta.get("regularMarketTime")
-    if period.get("end") and quote_time and quote_time < period["end"]:
+    # 只有「報價時間落在本交易時段內，且此刻時段尚未結束」才算盤中。
+    # 週末或盤前 Yahoo 的 currentTradingPeriod 常指向下一個交易日，
+    # 若只比較 quote_time < end，會把上一個交易日的正式收盤誤判為盤中而丟掉。
+    now = dt.datetime.now(dt.timezone.utc).timestamp()
+    if (period.get("start") and period.get("end") and quote_time
+            and period["start"] <= quote_time < period["end"] and now < period["end"]):
         last_day = dt.datetime.fromtimestamp(quote_time + tz, dt.timezone.utc)
         if rows and rows[-1][0] == last_day.date():
             intraday = {
