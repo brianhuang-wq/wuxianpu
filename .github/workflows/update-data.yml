@@ -10,6 +10,9 @@ on:
   push:
     paths:
       - 'tickers.txt'
+      - 'wuxianpu.py'
+      - 'gen_standalone.py'
+      - '.github/workflows/update-data.yml'
 
 permissions:
   contents: write
