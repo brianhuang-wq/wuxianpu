@@ -8,6 +8,8 @@ import argparse
 import datetime as dt
 import json
 import os
+import urllib.parse
+import urllib.request
 
 import wuxianpu as core
 
@@ -534,6 +536,44 @@ addEventListener('resize', () => { if (cur) render(); });
 """
 
 
+FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
+
+
+def finmind_closes(code, since):
+    """向 FinMind（資料源自證交所／櫃買中心）取台股已收盤價，回傳 {date: close}。"""
+    data_id = "TAIEX" if code.upper() == "^TWII" else code
+    query = urllib.parse.urlencode({"dataset": "TaiwanStockPrice", "data_id": data_id,
+                                    "start_date": since.isoformat()})
+    req = urllib.request.Request(f"{FINMIND_URL}?{query}", headers={"User-Agent": core.UA})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        payload = json.load(resp)
+    return {dt.date.fromisoformat(r["date"]): float(r["close"])
+            for r in payload.get("data") or [] if r.get("close")}
+
+
+def patch_taiwan(code, rows, today):
+    """Yahoo 偶爾缺少台股某天的收盤（例如 0050 的 11/24 收盤為空值），
+    以 FinMind 補齊近 45 天缺漏的交易日。兩邊重疊日價格差逾 3%（如分割調整差異）就不補。"""
+    if not (code.isdigit() or code[:-1].isdigit() or code.upper() == "^TWII"):
+        return rows, []
+    since = today - dt.timedelta(days=45)
+    try:
+        fm = finmind_closes(code, since)
+    except Exception as exc:                   # noqa: BLE001
+        print(f"  {code:8} FinMind 補資料失敗（{exc}），僅用 Yahoo")
+        return rows, []
+    have = dict(rows)
+    for day, close in fm.items():
+        if day in have and abs(have[day] - close) / close > 0.03:
+            print(f"  {code:8} FinMind 與 Yahoo 價格不一致（{day}），不補資料")
+            return rows, []
+    added = sorted(d for d in fm if d not in have and d >= since)
+    if not added:
+        return rows, []
+    merged = sorted({**have, **{d: fm[d] for d in added}}.items())
+    return merged, added
+
+
 def load_tickers(path):
     """從文字檔讀取股票清單；每行格式為「代碼,名稱」，# 開頭為註解。"""
     if not path or not os.path.exists(path):
@@ -569,6 +609,9 @@ def main():
         _sym, _name, rows, intraday = core.resolve(code, start, end)
         if intraday:                           # 排除未收盤的盤中價
             rows = [r for r in rows if r[0] != intraday["date"]]
+        rows, added = patch_taiwan(code, rows, end)
+        if added:
+            print(f"  {code:8} 以 FinMind 補上 Yahoo 缺漏：{'、'.join(d.strftime('%m/%d') for d in added)}")
         if not rows:
             raise ValueError("無可用資料")
         print(f"  {code:8} {label:12} {len(rows):5} 筆　最新 {rows[-1][1]:,.2f}")
